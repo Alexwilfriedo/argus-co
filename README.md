@@ -24,7 +24,7 @@ plugins/argus/
 Clone this repository, then add the repository root as a local Codex marketplace:
 
 ```bash
-codex plugin marketplace add /path/to/argus-com
+codex plugin marketplace add /path/to/argus-co
 codex plugin add argus@personal
 ```
 
