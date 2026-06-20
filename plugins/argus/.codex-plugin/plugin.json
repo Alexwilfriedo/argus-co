@@ -1,0 +1,45 @@
+{
+  "name": "argus",
+  "version": "1.0.0",
+  "description": "Argus is a Codex QA/QE plugin for web apps: live audits, demo capture, Playwright non-regression harness, accessibility, Core Web Vitals, visual regression, links, console/network, security checks, and CI reports.",
+  "author": {
+    "name": "Alex Wilfried OUATTARA",
+    "email": "alexwilfriedo@gmail.com",
+    "url": "https://github.com/Alexwilfriedo"
+  },
+  "homepage": "https://github.com/Alexwilfriedo/argus-com",
+  "repository": "https://github.com/Alexwilfriedo/argus-com",
+  "license": "MIT",
+  "keywords": [
+    "qa",
+    "qe",
+    "playwright",
+    "e2e",
+    "visual-regression",
+    "accessibility",
+    "core-web-vitals",
+    "security",
+    "ci",
+    "codex"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Argus",
+    "shortDescription": "Audit web apps and install a Playwright QA harness.",
+    "longDescription": "Argus helps Codex audit live web applications, install a deterministic Playwright non-regression harness, check accessibility, performance, links, console/network health, security headers/authz, and generate CI-ready reports.",
+    "developerName": "Alex Wilfried OUATTARA",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Write",
+      "Testing",
+      "Browser Automation"
+    ],
+    "brandColor": "#E85D26",
+    "defaultPrompt": [
+      "Installe Argus dans ce projet et prepare la config.",
+      "Audite cette application web avec Argus.",
+      "Transforme ces findings QA en specs Playwright."
+    ]
+  }
+}
