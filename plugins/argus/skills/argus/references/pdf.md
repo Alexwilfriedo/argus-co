@@ -39,3 +39,15 @@ python3 "$SKILL_DIR/scripts/report.py" campagne.json rapport.pdf
 ```
 
 Python 3.8+ et Chrome ou Chromium locaux sont nécessaires. Définir `ARGUS_CHROME` si le navigateur se trouve hors des chemins usuels. Le PDF présente les résultats d’exécution, les constats et le nombre de scénarios prévus ayant un résultat. Un scénario supplémentaire apparaît dans le détail sans augmenter le nombre prévu. Un cas prévu mais absent reste non vérifié. Le code de sortie du générateur indique le succès de l’export. Conserver le code du moteur de test pour la CI. Ouvrir le PDF et vérifier sa lisibilité et son périmètre avant remise.
+
+## Comparer le candidat à une campagne de référence
+
+```bash
+python3 "$SKILL_DIR/scripts/report.py" candidat/campagne.json rapport.pdf --reference reference/campagne.json
+```
+
+Conserver les sources de chaque build dans le dossier de son manifeste. Le tableau de comparaison indique les deux builds, les fichiers de résultats (chemins depuis le dossier du candidat) et le nom exact du cas à retrouver dans chacun. La commande à deux arguments reste disponible pour remettre le bilan d’une seule campagne.
+
+Conserver le même périmètre (`scope`), le même libellé de cible, le même scénario et le même attendu explicite (`notes[nom].expected`). Si les étapes de reproduction sont renseignées, elles doivent aussi correspondre. Playwright demande un projet nommé et la même suite. Maestro demande le même appareil et la même application consignés dans `target.txt`. Les observations manuelles restent consultables dans le bilan du candidat.
+
+Le tableau distingue régression, correction, défaut persistant et succès maintenu. Un cas renommé, ambigu, bloqué, instable ou privé de preuve ou d’attendu apparaît avec son motif. Les anciens manifestes peuvent donc servir de référence pour les cas suffisamment documentés. Un build consigné par le moteur doit correspondre au manifeste.
