@@ -191,3 +191,93 @@ class ComparisonTest(unittest.TestCase):
         html = self.compare([old], [new])
         self.assertIn("Corrections · 0", html)
         self.assertIn("erreur sans cas correspondant", html)
+
+    def test_unreadable_junit_keeps_device_identity_and_vetoes_other_copy(self):
+        old = self.mobile(self.old, {"A": "fail"})
+        new = self.mobile(self.new, {"A": "pass"})
+        broken = self.mobile(self.new, {"A": "pass"}, folder="extra")
+        (self.new / "extra/junit.xml").write_text("<testsuite>")
+        for targets in ([broken], [broken, new], [new, broken]):
+            with self.subTest(targets=targets):
+                html = self.compare([old], targets)
+                self.assertIn("Corrections · 0", html)
+                self.assertIn("Non comparables · 1", html)
+                self.assertIn("illisible", html)
+
+    def test_same_build_cannot_establish_transition(self):
+        old = self.mobile(self.old, {"A": "pass", "B": "fail"})
+        new = self.mobile(self.new, {"A": "fail", "B": "pass"})
+        ref = self.old / "campaign.json"
+        ref.write_text(json.dumps(self.campaign(self.new, [old])))
+        html = report.build_html(self.campaign(self.new, [new]), self.new, reference=ref)
+        self.assertIn("Régressions · 0 | Corrections · 0", html)
+        self.assertIn("même build", html)
+
+    def test_web_errors_on_attempt_or_source(self):
+        names = ("Good", "Problem")
+        old = self.web(self.old, [(n, "Chrome", "unexpected", ["failed"]) for n in names])
+        new = self.web(self.new, [(n, "Chrome", "expected", ["passed"]) for n in names])
+        path = self.new / "pw.json"
+        data = json.loads(path.read_text())
+        attempt = data["suites"][0]["specs"][1]["tests"][0]["results"][0]
+        for key, value in (("errors", [{"message": "synthetic"}]), ("error", {"message": "synthetic"})):
+            with self.subTest(key=key):
+                attempt[key] = value
+                path.write_text(json.dumps(data))
+                html = self.compare([old], [new])
+                self.assertIn("Corrections · 1", html)
+                self.assertIn("erreur", html)
+                attempt.pop(key)
+        path = self.old / "pw.json"
+        data = json.loads(path.read_text())
+        data["errors"] = [{"message": "fixture"}]
+        path.write_text(json.dumps(data))
+        html = self.compare([old], [new])
+        self.assertIn("Corrections · 0", html)
+        self.assertIn("erreur globale", html)
+
+    def test_web_collision_and_malformed_attempt_preserve_peer(self):
+        names = ("Problem", "Good")
+        old = self.web(self.old, [(n, "Chrome", "expected", ["passed"]) for n in names])
+        for collision in (True, False):
+            with self.subTest(collision=collision):
+                new = self.web(self.new, [(n, "Chrome", "unexpected", ["failed"]) for n in names])
+                path = self.new / "pw.json"
+                data = json.loads(path.read_text())
+                specs = data["suites"][0]["specs"]
+                if collision:
+                    specs.append(specs[0])
+                else:
+                    specs[0]["tests"][0]["results"][0]["status"] = ["failed"]
+                path.write_text(json.dumps(data))
+                html = self.compare([old], [new])
+                self.assertIn("Régressions · 1", html)
+                self.assertIn("Non comparables · 1", html)
+
+    def test_maestro_contradictions_are_not_transitions(self):
+        old = self.mobile(self.old, {"A": "pass", "B": "pass"})
+        new = self.mobile(self.new, {"A": "fail", "B": "fail"})
+        path = self.new / "run/junit.xml"
+        doc = path.read_text()
+        path.write_text(doc.replace('name="A"', 'name="A" status="SUCCESS"'))
+        html = self.compare([old], [new])
+        self.assertIn("Régressions · 1", html)
+        self.assertIn("contradictoires", html)
+        path.write_text(doc)
+        (self.new / "run/exit-code.txt").write_text("0")
+        self.assertIn("Régressions · 0", self.compare([old], [new]))
+
+    def test_identical_junit_bytes_on_distinct_devices(self):
+        old = [self.mobile(self.old, {"A": "pass"}, folder=d, device=d) for d in ("ios", "android")]
+        new = [self.mobile(self.new, {"A": "fail"}, folder=d, device=d) for d in ("ios", "android")]
+        self.assertIn("Régressions · 2", self.compare(old, new))
+
+    def test_invalid_notes_leave_other_results_intact(self):
+        old = self.mobile(self.old, {"A": "pass", "B": "pass"})
+        new = self.mobile(self.new, {"A": "fail", "B": "fail"})
+        new["notes"]["B"] = None
+        html = self.compare([old], [new])
+        self.assertIn("Régressions · 1", html)
+        self.assertIn("Non comparables · 1", html)
+        new["notes"] = dict(old["notes"], Unplanned=None)
+        self.assertIn("Régressions · 2", self.compare([old], [new]))

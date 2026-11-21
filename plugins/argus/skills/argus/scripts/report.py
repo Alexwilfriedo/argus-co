@@ -44,6 +44,9 @@ def mobile_results(folder, trace):
         reported = case.get("status", "").upper()
         status = {"": "pass", "SUCCESS": "pass", "PASSED": "pass", "FAILED": "fail",
                   "FAILURE": "fail", "ERROR": "blocked", "SKIPPED": "skip"}.get(reported, "blocked")
+        declared = status
+        markers = [value for tag, value in (("error", "blocked"), ("failure", "fail"), ("skipped", "skip"))
+                   if case.find(tag) is not None]
         if case.find("error") is not None:
             status = "blocked"
             issues.append(f"Erreur d’exécution · {case.get('name')}")
@@ -51,7 +54,10 @@ def mobile_results(folder, trace):
             status = "fail"
         elif case.find("skipped") is not None:
             status = "skip"
-        add(cases, case.get("name"), status)
+        name = case.get("name")
+        if len(markers) > 1 or (reported and markers and declared != status) or (code == "0" and status == "fail"):
+            trace.case_issues[name] = "Signaux Maestro contradictoires dans le JUnit ou le code de sortie."
+        add(cases, name, status)
     if suite_error and "fail" not in cases.values():
         issues.append("La suite JUnit signale une erreur hors des cas rapportés.")
     if code not in {"0", "1"} or (code != "0" or suite_error) and not {"fail", "blocked"}.intersection(cases.values()):
@@ -59,45 +65,87 @@ def mobile_results(folder, trace):
     return cases, issues
 
 
-def web_results(path, build, identities, case_issues):
+def web_status(test):
+    if test.get("status") == "skipped":
+        return "skip", ""
+    results = test.get("results")
+    if not isinstance(results, list) or any(
+        not isinstance(item, dict) or not isinstance(item.get("status"), str) for item in results
+    ):
+        return "blocked", "Tentatives Playwright absentes ou illisibles."
+    attempts = [item["status"] for item in results]
+    final = attempts[-1] if attempts else None
+    outcome = test.get("status")
+    if final in {None, "interrupted"}:
+        return "blocked", ""
+    if outcome == "flaky":
+        return "flaky", ""
+    if outcome == "expected" and test.get("expectedStatus") == final == "failed":
+        return "xfail", ""
+    if outcome == "expected" and final != "passed":
+        return "skip", ""
+    if outcome not in ("expected", "unexpected"):
+        return "blocked", ""
+    status = "pass" if outcome == "expected" else "fail"
+    expected_attempts = {"passed"} if status == "pass" else {"failed", "timedOut"}
+    if any(item["status"] == "passed" and (item.get("error") or item.get("errors")) for item in results):
+        return status, "Tentative réussie avec une erreur Playwright."
+    if test.get("expectedStatus", "passed") != "passed":
+        return status, "Statut attendu du moteur différent d’un succès."
+    if any(value not in expected_attempts for value in attempts):
+        return status, "Tentatives incomplètes, instables ou discordantes."
+    return status, ""
+
+
+def web_results(path, build, identities, trace):
     report = json.loads(path.read_text())
     cases = {}
     issues = ["Playwright a signalé une erreur globale."] if report.get("errors") else []
+    trace.incomplete.extend(issues)
 
     recorded = report.get("config", {}).get("metadata", {}).get("argusBuild")
     if recorded and recorded != build:
         return {}, ["Le build consigné par Playwright diffère du manifeste."]
 
+    def records(parent, key):
+        items = parent.get(key, [])
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    yield item
+                else:
+                    issues.append("Entrée Playwright illisible.")
+        else:
+            issues.append("Liste Playwright illisible.")
+
     def visit(suite, parents):
+        if not isinstance(suite.get("title"), str):
+            issues.append("Suite Playwright sans titre.")
+            return
         parents = [*parents, suite["title"]]
-        for spec in suite.get("specs", []):
-            for test in spec["tests"]:
-                name = " › ".join(filter(None, [test.get("projectName"), *parents, spec["title"]]))
-                project = test.get("projectName")
-                if isinstance(project, str) and project.strip():
-                    identities[name] = (project, test.get("projectId", ""), *parents, spec["title"])
-                attempts = [item.get("status") if isinstance(item, dict) else None
-                            for item in (test.get("results") or [])]
-                outcome = test.get("status")
-                final = attempts[-1] if attempts else None
-                status = {"unexpected": "fail", "flaky": "flaky", "skipped": "skip"}.get(outcome, "blocked")
-                if status != "skip" and final in {None, "interrupted"}:
-                    status = "blocked"
-                elif outcome == "expected" and test.get("expectedStatus") == final == "failed":
-                    status = "xfail"
-                elif outcome == "expected":
-                    status = "pass" if final == "passed" else "skip"
-                if status in {"pass", "fail"}:
-                    expected_attempts = {"passed"} if status == "pass" else {"failed", "timedOut"}
-                    if test.get("expectedStatus", "passed") != "passed":
-                        case_issues[name] = "Statut attendu du moteur différent d’un succès."
-                    elif any(value not in expected_attempts for value in attempts):
-                        case_issues[name] = "Tentatives incomplètes, instables ou discordantes."
-                add(cases, name, status)
-        for child in suite.get("suites", []):
+        for spec in records(suite, "specs"):
+            for test in records(spec, "tests"):
+                project = test.get("projectName", "")
+                project_id = test.get("projectId", project)
+                title = spec.get("title")
+                if not isinstance(title, str) or not title or not isinstance(project, str):
+                    issues.append("Scénario Playwright sans identité lisible.")
+                    continue
+                name = " › ".join(filter(None, [project, *parents, title]))
+                if name in cases:
+                    trace.case_issues[name] = "Plusieurs résultats Playwright portent le même nom."
+                    cases[name] = "blocked"
+                    continue
+                if project.strip() and isinstance(project_id, str):
+                    identities[name] = (project, project_id, *parents, title)
+                status, reason = web_status(test)
+                cases[name] = status
+                if reason:
+                    trace.case_issues[name] = reason
+        for child in records(suite, "suites"):
             visit(child, parents)
 
-    for suite in report["suites"]:
+    for suite in records(report, "suites"):
         visit(suite, [])
     return cases, issues
 
@@ -113,6 +161,7 @@ def local_evidence(base, reference):
 class Trace:
     # Keep individual attempts alongside the existing campaign-level verdict.
     comparing: bool = False
+    device_identity: tuple = None
     attempts: dict = field(default_factory=lambda: defaultdict(list))
     incomplete: list = field(default_factory=list)
     case_issues: dict = field(default_factory=dict)
@@ -151,6 +200,9 @@ def read_runs(kind, source, base, build, target, used, trace):
                     issues.append(f"{ref} · Identité de la cible incompatible ou absente.")
                     trace.incomplete.append(issues[-1])
                     continue
+                if device.strip() and app.strip():
+                    trace.device_identity = (device, app)
+                    first_device = trace.device_identity
                 recorded = folder / "build.txt"
                 if recorded.exists() and recorded.read_text().strip() != build:
                     issues.append(f"{ref} · Le build consigné par Maestro diffère du manifeste.")
@@ -160,19 +212,17 @@ def read_runs(kind, source, base, build, target, used, trace):
                 if device.strip() and app.strip():
                     identities = dict.fromkeys(current, (device, app))
             else:
-                current, warnings = web_results(folder, build, identities, trace.case_issues)
+                current, warnings = web_results(folder, build, identities, trace)
             issues.extend(warnings)
             if not current:
                 trace.incomplete.extend(warnings or [f"{ref} · Aucun résultat brut."])
                 continue
-            fingerprint = (kind, hashlib.sha256(artifact.read_bytes()).digest())
+            fingerprint = (kind, trace.device_identity if trace.comparing else None, hashlib.sha256(artifact.read_bytes()).digest())
             if fingerprint in used:
                 issues.append(f"{ref} · Résultat déjà utilisé dans cette campagne.")
                 trace.incomplete.append(issues[-1])
                 continue
             used.add(fingerprint)
-            if kind == "maestro":
-                first_device = (device, app)
             for name, status in current.items():
                 if trace.comparing:
                     trace.attempts[name].append((identities.get(name), status, artifact))
@@ -192,7 +242,8 @@ def read_runs(kind, source, base, build, target, used, trace):
 
 def read_target(target, base, build, used, trace):
     plan = target["planned"]
-    if not isinstance(plan, list) or not plan or len(plan) != len(set(plan)):
+    if (not isinstance(plan, list) or not plan or any(not isinstance(name, str) or not name for name in plan)
+            or len(plan) != len(set(plan))):
         raise ValueError("Chaque cible demande une liste planned de noms distincts.")
     sources = [kind for kind in ("maestro", "playwright", "observations") if kind in target]
     if len(sources) != 1:
@@ -240,15 +291,26 @@ class ComparedCase:
     reason: str
 
 
+def campaign_notes(target, names):
+    raw = target.get("notes", {})
+    invalid = {"conflict": "Note de scénario illisible."}
+    if not isinstance(raw, dict):
+        return dict.fromkeys(names, invalid)
+    return {name: note if isinstance(note, dict) else invalid for name, note in raw.items()
+            if isinstance(note, dict) or name in names}
+
+
 def index_target(index, target, trace, cases):
     kind = next(key for key in ("playwright", "maestro", "observations") if key in target)
     label = target.get("label") or ""
-    for name in dict.fromkeys([*target["planned"], *cases]):
+    names = dict.fromkeys([*target["planned"], *cases])
+    notes = campaign_notes(target, names)
+    for name in names:
         attempts = trace.attempts.get(name, [])
-        identity = attempts[0][0] if attempts else None
+        identity = attempts[0][0] if attempts else trace.device_identity
         statuses = {status for _, status, _ in attempts}
         status = cases.get(name, "blocked")
-        note = target.get("notes", {}).get(name, {})
+        note = notes.get(name, {})
         reason = ""
         if kind == "observations":
             reason = "Observation déclarée sans résultat brut du moteur."
@@ -275,12 +337,15 @@ TRANSITIONS = {("pass", "fail"): "Régression", ("fail", "pass"): "Correction",
                ("fail", "fail"): "Défaut persistant", ("pass", "pass"): "Succès maintenu"}
 
 
-def classify(before, after, same_scope):
+def classify(before, after, same_scope, same_build):
+    if same_build:
+        return "Non comparable", "Les deux campagnes identifient le même build."
     for side, entries in (("Référence", before), ("Candidat", after)):
+        for entry in entries:
+            if entry.reason:
+                return "Non comparable", f"{side} · {entry.reason}"
         if len(entries) > 1:
             return "Non comparable", f"{side} · Plusieurs résultats pour la même identité."
-        if entries and entries[0].reason:
-            return "Non comparable", f"{side} · {entries[0].reason}"
     if not before or not after:
         side = "la référence" if not before else "le candidat"
         return "Non comparable", f"Scénario ou cible sans correspondance dans {side}."
@@ -308,7 +373,10 @@ def comparison_target(target, base, build, used, index):
     trace = Trace(comparing=True)
     try:
         cases, issues, source = read_target(target, base, build, used, trace)
-        index_target(index, target, trace, cases)
+        local_index = defaultdict(list)
+        index_target(local_index, target, trace, cases)
+        for key, entries in local_index.items():
+            index[key].extend(entries)
         return cases, issues, source
     except (KeyError, ValueError, TypeError, AttributeError) as error:
         reason = f"Cible inexploitable · {error}"
@@ -340,7 +408,14 @@ def comparison_html(reference, campaign, base, candidate):
     for key in dict.fromkeys([*candidate, *baseline]):
         label, kind, name, identity = key
         before, after = baseline.get(key, []), candidate.get(key, [])
-        verdict, reason = classify(before, after, same_scope)
+        if identity:
+            # An unreadable second run on the same named target could be a retry of this case.
+            unknown = (label, kind, name, None)
+            if before:
+                before = before + baseline.get(unknown, [])
+            if after:
+                after = after + candidate.get(unknown, [])
+        verdict, reason = classify(before, after, same_scope, build.strip() == campaign["build"].strip())
         totals[verdict] += 1
         target = " · ".join((label, kind, *identity[:2])) if identity and kind == "maestro" else f"{label} · {kind}"
         rows.append(f"<tr><td><strong>{h(name)}</strong><div>{h(target)}</div>"
@@ -378,7 +453,7 @@ def build_html(campaign, base, reference=None):
                 continue
         names = target["planned"]
         planned += len(names)
-        notes = dict(target.get("notes", {}))
+        notes = campaign_notes(target, set(names).union(cases))
         if "observations" in target:
             for obs in target["observations"]:
                 notes[obs["name"]] = {**notes.get(obs["name"], {}), **obs}
