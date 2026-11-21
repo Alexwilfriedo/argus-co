@@ -1,5 +1,7 @@
 # Argus — Contrat de sortie (rapports)
 
+Pour le PDF de campagne web, mobile ou mixte, suivre `references/pdf.md`.
+
 > À lire au moment de produire un rapport. Deux publics : la **machine** (CI) et l'**humain**.
 > En mode REGRESS, le harness `@playwright/test` produit déjà le JSON et le JUnit via ses
 > reporters ; `scripts/argus-report.mjs` transforme ce JSON en rapport HTML Argus.

@@ -1,7 +1,7 @@
 {
   "name": "argus",
-  "version": "1.0.0",
-  "description": "Argus is a Codex QA/QE plugin for web apps: live audits, demo capture, Playwright non-regression harness, accessibility, Core Web Vitals, visual regression, links, console/network, security checks, and CI reports.",
+  "version": "1.1.0",
+  "description": "Agent QA pour audits et tests de non-régression web, Android et iOS. Conçoit les cas limites et contradictions métier, exécute Playwright ou Maestro et remet un rapport PDF avec les résultats et les preuves.",
   "author": {
     "name": "Alex Wilfried OUATTARA",
     "email": "alexwilfriedo@gmail.com",
@@ -20,13 +20,16 @@
     "core-web-vitals",
     "security",
     "ci",
-    "codex"
+    "codex",
+    "maestro",
+    "mobile",
+    "pdf"
   ],
   "skills": "./skills/",
   "interface": {
     "displayName": "Argus",
-    "shortDescription": "Audit web apps and install a Playwright QA harness.",
-    "longDescription": "Argus helps Codex audit live web applications, install a deterministic Playwright non-regression harness, check accessibility, performance, links, console/network health, security headers/authz, and generate CI-ready reports.",
+    "shortDescription": "Tester le web, Android et iOS avec Playwright et Maestro.",
+    "longDescription": "Agent QA pour audits et tests de non-régression web, Android et iOS. Conçoit les cas limites et contradictions métier, exécute Playwright ou Maestro et remet un rapport PDF avec les résultats et les preuves.",
     "developerName": "Alex Wilfried OUATTARA",
     "category": "Developer Tools",
     "capabilities": [
@@ -39,7 +42,8 @@
     "defaultPrompt": [
       "Installe Argus dans ce projet et prepare la config.",
       "Audite cette application web avec Argus.",
-      "Transforme ces findings QA en specs Playwright."
+      "Transforme ces findings QA en specs Playwright.",
+      "Teste les cas limites sur mobile avec Maestro et remets le rapport PDF."
     ]
   }
 }
