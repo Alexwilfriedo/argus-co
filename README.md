@@ -1,6 +1,6 @@
 # Argus for Codex
 
-Argus is a Codex plugin for QA/QE work on web applications. It can help Codex run
+Argus is a Codex plugin for QA/QE work on web and native mobile applications. It runs Android and iOS flows with Maestro and produces PDF campaign reports. It can help Codex run
 or prepare live audits, demo captures, and a deterministic `@playwright/test`
 non-regression harness with visual regression, accessibility, Core Web Vitals,
 links, console/network health, security checks, JSON/JUnit/HTML reports, and CI
@@ -18,6 +18,12 @@ plugins/argus/
     scripts/install.sh
     assets/scaffold/
 ```
+
+## Android, iOS et rapport PDF
+
+Demander à Argus de tester un binaire local, par exemple « Vérifie le refus des périodes inversées sur Android et iOS et remets le rapport PDF ». Argus prépare les cas métier, exécute les flows Maestro sur chaque appareil et rapproche le plan des résultats observés. Un produit mixte peut réunir les résultats Playwright, Maestro et les contrôles exploratoires dans le même PDF.
+
+[Guide Maestro](plugins/argus/skills/argus/references/mobile.md) · [Génération du PDF](plugins/argus/skills/argus/references/pdf.md)
 
 ## Install Locally
 
