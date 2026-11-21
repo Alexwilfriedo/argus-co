@@ -1,18 +1,18 @@
 """Build an offline PDF from a campaign plan and the results of its own run."""
 import argparse
 import base64
-from collections import Counter
-from datetime import datetime, timezone
-from html import escape
 import hashlib
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
-from tempfile import TemporaryDirectory
 import xml.etree.ElementTree as ET
-
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from html import escape
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 LABEL = {"pass": "Réussi", "fail": "Échec", "flaky": "Instable",
          "skip": "Ignoré", "blocked": "Non vérifié", "xfail": "Échec attendu"}
@@ -24,7 +24,7 @@ def add(results, name, status):
     results[name] = status
 
 
-def mobile_results(folder):
+def mobile_results(folder, trace):
     cases = {}
     issues = []
     code = (folder / "exit-code.txt").read_text().strip()
@@ -44,6 +44,9 @@ def mobile_results(folder):
         reported = case.get("status", "").upper()
         status = {"": "pass", "SUCCESS": "pass", "PASSED": "pass", "FAILED": "fail",
                   "FAILURE": "fail", "ERROR": "blocked", "SKIPPED": "skip"}.get(reported, "blocked")
+        declared = status
+        markers = [value for tag, value in (("error", "blocked"), ("failure", "fail"), ("skipped", "skip"))
+                   if case.find(tag) is not None]
         if case.find("error") is not None:
             status = "blocked"
             issues.append(f"Erreur d’exécution · {case.get('name')}")
@@ -51,39 +54,98 @@ def mobile_results(folder):
             status = "fail"
         elif case.find("skipped") is not None:
             status = "skip"
-        add(cases, case.get("name"), status)
+        name = case.get("name")
+        if len(markers) > 1 or (reported and markers and declared != status) or (code == "0" and status == "fail"):
+            trace.case_issues[name] = "Signaux Maestro contradictoires dans le JUnit ou le code de sortie."
+        add(cases, name, status)
     if suite_error and "fail" not in cases.values():
         issues.append("La suite JUnit signale une erreur hors des cas rapportés.")
+    if code not in {"0", "1"} or (code != "0" or suite_error) and not {"fail", "blocked"}.intersection(cases.values()):
+        trace.incomplete.append("Exécution Maestro interrompue ou erreur sans cas correspondant.")
     return cases, issues
 
 
-def web_results(path, build):
+def web_status(test):
+    if test.get("status") == "skipped":
+        return "skip", ""
+    results = test.get("results")
+    if not isinstance(results, list) or any(
+        not isinstance(item, dict) or not isinstance(item.get("status"), str) for item in results
+    ):
+        return "blocked", "Tentatives Playwright absentes ou illisibles."
+    attempts = [item["status"] for item in results]
+    final = attempts[-1] if attempts else None
+    outcome = test.get("status")
+    if final in {None, "interrupted"}:
+        return "blocked", ""
+    if outcome == "flaky":
+        return "flaky", ""
+    if outcome == "expected" and test.get("expectedStatus") == final == "failed":
+        return "xfail", ""
+    if outcome == "expected" and final != "passed":
+        return "skip", ""
+    if outcome not in ("expected", "unexpected"):
+        return "blocked", ""
+    status = "pass" if outcome == "expected" else "fail"
+    expected_attempts = {"passed"} if status == "pass" else {"failed", "timedOut"}
+    if any(item["status"] == "passed" and (item.get("error") or item.get("errors")) for item in results):
+        return status, "Tentative réussie avec une erreur Playwright."
+    if test.get("expectedStatus", "passed") != "passed":
+        return status, "Statut attendu du moteur différent d’un succès."
+    if any(value not in expected_attempts for value in attempts):
+        return status, "Tentatives incomplètes, instables ou discordantes."
+    return status, ""
+
+
+def web_results(path, build, identities, trace):
     report = json.loads(path.read_text())
     cases = {}
     issues = ["Playwright a signalé une erreur globale."] if report.get("errors") else []
+    trace.incomplete.extend(issues)
 
     recorded = report.get("config", {}).get("metadata", {}).get("argusBuild")
     if recorded and recorded != build:
         return {}, ["Le build consigné par Playwright diffère du manifeste."]
 
+    def records(parent, key):
+        items = parent.get(key, [])
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    yield item
+                else:
+                    issues.append("Entrée Playwright illisible.")
+        else:
+            issues.append("Liste Playwright illisible.")
+
     def visit(suite, parents):
+        if not isinstance(suite.get("title"), str):
+            issues.append("Suite Playwright sans titre.")
+            return
         parents = [*parents, suite["title"]]
-        for spec in suite.get("specs", []):
-            for test in spec["tests"]:
-                name = " › ".join(filter(None, [test.get("projectName"), *parents, spec["title"]]))
-                attempts = test.get("results", [])
-                status = {"unexpected": "fail", "flaky": "flaky", "skipped": "skip"}.get(test["status"], "blocked")
-                if status != "skip" and (not attempts or attempts[-1]["status"] == "interrupted"):
-                    status = "blocked"
-                elif test["status"] == "expected" and test.get("expectedStatus") == "failed" and attempts[-1]["status"] == "failed":
-                    status = "xfail"
-                elif test["status"] == "expected" and attempts:
-                    status = "pass" if attempts[-1]["status"] == "passed" else "skip"
-                add(cases, name, status)
-        for child in suite.get("suites", []):
+        for spec in records(suite, "specs"):
+            for test in records(spec, "tests"):
+                project = test.get("projectName", "")
+                project_id = test.get("projectId", project)
+                title = spec.get("title")
+                if not isinstance(title, str) or not title or not isinstance(project, str):
+                    issues.append("Scénario Playwright sans identité lisible.")
+                    continue
+                name = " › ".join(filter(None, [project, *parents, title]))
+                if name in cases:
+                    trace.case_issues[name] = "Plusieurs résultats Playwright portent le même nom."
+                    cases[name] = "blocked"
+                    continue
+                if project.strip() and isinstance(project_id, str):
+                    identities[name] = (project, project_id, *parents, title)
+                status, reason = web_status(test)
+                cases[name] = status
+                if reason:
+                    trace.case_issues[name] = reason
+        for child in records(suite, "suites"):
             visit(child, parents)
 
-    for suite in report["suites"]:
+    for suite in records(report, "suites"):
         visit(suite, [])
     return cases, issues
 
@@ -95,7 +157,17 @@ def local_evidence(base, reference):
     return base.resolve() in path.parents and path.is_file() and path.stat().st_size > 0
 
 
-def read_runs(kind, source, base, build, target, used):
+@dataclass
+class Trace:
+    # Keep individual attempts alongside the existing campaign-level verdict.
+    comparing: bool = False
+    device_identity: tuple = None
+    attempts: dict = field(default_factory=lambda: defaultdict(list))
+    incomplete: list = field(default_factory=list)
+    case_issues: dict = field(default_factory=dict)
+
+
+def read_runs(kind, source, base, build, target, used, trace):
     sources = source if isinstance(source, list) else [source]
     if not sources or (len(sources) > 1 and kind != "maestro"):
         raise ValueError("Choisir un JSON Playwright ou une suite de runs Maestro.")
@@ -104,8 +176,17 @@ def read_runs(kind, source, base, build, target, used):
     for ref in sources:
         folder = base / ref
         artifact = folder / "junit.xml" if kind == "maestro" else folder
+        identities = {}
         origins.append(ref)
         try:
+            if not folder.exists():
+                raise FileNotFoundError(ref)
+            if trace.comparing:
+                paths = [artifact]
+                if kind == "maestro":
+                    paths.extend(folder / name for name in ("target.txt", "build.txt", "exit-code.txt"))
+                if any(base.resolve() not in path.resolve().parents for path in paths):
+                    raise ValueError("Source en dehors du dossier de la campagne.")
             if kind == "maestro":
                 identity = folder / "target.txt"
                 device, app = identity.read_text().splitlines() if identity.exists() else ("", "")
@@ -117,25 +198,34 @@ def read_runs(kind, source, base, build, target, used):
                         or first_device is not None and first_device != (device, app)
                         or len(sources) > 1 and not (device and app)):
                     issues.append(f"{ref} · Identité de la cible incompatible ou absente.")
+                    trace.incomplete.append(issues[-1])
                     continue
+                if device.strip() and app.strip():
+                    trace.device_identity = (device, app)
+                    first_device = trace.device_identity
                 recorded = folder / "build.txt"
                 if recorded.exists() and recorded.read_text().strip() != build:
                     issues.append(f"{ref} · Le build consigné par Maestro diffère du manifeste.")
+                    trace.incomplete.append(issues[-1])
                     continue
-                current, warnings = mobile_results(folder)
+                current, warnings = mobile_results(folder, trace)
+                if device.strip() and app.strip():
+                    identities = dict.fromkeys(current, (device, app))
             else:
-                current, warnings = web_results(folder, build)
+                current, warnings = web_results(folder, build, identities, trace)
             issues.extend(warnings)
             if not current:
+                trace.incomplete.extend(warnings or [f"{ref} · Aucun résultat brut."])
                 continue
-            fingerprint = (kind, hashlib.sha256(artifact.read_bytes()).digest())
+            fingerprint = (kind, trace.device_identity if trace.comparing else None, hashlib.sha256(artifact.read_bytes()).digest())
             if fingerprint in used:
                 issues.append(f"{ref} · Résultat déjà utilisé dans cette campagne.")
+                trace.incomplete.append(issues[-1])
                 continue
             used.add(fingerprint)
-            if kind == "maestro":
-                first_device = (device, app)
             for name, status in current.items():
+                if trace.comparing:
+                    trace.attempts[name].append((identities.get(name), status, artifact))
                 previous = cases.get(name)
                 if status == "pass" and previous in {"fail", "flaky"}:
                     status = "flaky"
@@ -144,14 +234,16 @@ def read_runs(kind, source, base, build, target, used):
                 cases[name] = status
         except (OSError, ValueError, TypeError, KeyError, AttributeError, IndexError, ET.ParseError):
             issues.append(f"{ref} · Pièce d’exécution absente ou illisible.")
+            trace.incomplete.append(issues[-1])
     if not cases:
         issues.append("Aucun scénario enregistré.")
     return cases, issues, " / ".join(origins)
 
 
-def read_target(target, base, build, used):
+def read_target(target, base, build, used, trace):
     plan = target["planned"]
-    if not isinstance(plan, list) or not plan or len(plan) != len(set(plan)):
+    if (not isinstance(plan, list) or not plan or any(not isinstance(name, str) or not name for name in plan)
+            or len(plan) != len(set(plan))):
         raise ValueError("Chaque cible demande une liste planned de noms distincts.")
     sources = [kind for kind in ("maestro", "playwright", "observations") if kind in target]
     if len(sources) != 1:
@@ -172,7 +264,7 @@ def read_target(target, base, build, used):
                 status = "blocked"
             add(cases, observation["name"], status)
         return cases, issues, "Observations consignées"
-    return read_runs(kind, source, base, build, target, used)
+    return read_runs(kind, source, base, build, target, used, trace)
 
 
 def h(value):
@@ -190,7 +282,156 @@ def screenshot(base, relative):
     return f'<img alt="Capture du constat" src="data:image/png;base64,{encoded}">'
 
 
-def build_html(campaign, base):
+@dataclass
+class ComparedCase:
+    expected: str
+    repro: str
+    status: str
+    artifacts: tuple
+    reason: str
+
+
+def campaign_notes(target, names):
+    raw = target.get("notes", {})
+    invalid = {"conflict": "Note de scénario illisible."}
+    if not isinstance(raw, dict):
+        return dict.fromkeys(names, invalid)
+    return {name: note if isinstance(note, dict) else invalid for name, note in raw.items()
+            if isinstance(note, dict) or name in names}
+
+
+def index_target(index, target, trace, cases):
+    kind = next(key for key in ("playwright", "maestro", "observations") if key in target)
+    label = target.get("label") or ""
+    names = dict.fromkeys([*target["planned"], *cases])
+    notes = campaign_notes(target, names)
+    for name in names:
+        attempts = trace.attempts.get(name, [])
+        identity = attempts[0][0] if attempts else trace.device_identity
+        statuses = {status for _, status, _ in attempts}
+        status = cases.get(name, "blocked")
+        note = notes.get(name, {})
+        reason = ""
+        if kind == "observations":
+            reason = "Observation déclarée sans résultat brut du moteur."
+        elif trace.incomplete:
+            reason = " ".join(trace.incomplete)
+        elif not attempts:
+            reason = "Résultat brut absent."
+        elif not label.strip() or not identity:
+            reason = "Identité de la cible absente."
+        elif note.get("conflict"):
+            reason = f"Règle à arbitrer · {note['conflict']}"
+        elif name in trace.case_issues:
+            reason = trace.case_issues[name]
+        elif len(statuses) > 1 or status == "flaky":
+            reason = "Résultat instable ou tentatives discordantes."
+        elif status not in {"pass", "fail"}:
+            reason = f"Résultat inexploitable · {LABEL[status]}."
+        artifacts = tuple((path, raw_status) for _, raw_status, path in attempts)
+        key = (label, kind, name, identity)
+        index[key].append(ComparedCase(note.get("expected"), note.get("repro"), status, artifacts, reason))
+
+
+TRANSITIONS = {("pass", "fail"): "Régression", ("fail", "pass"): "Correction",
+               ("fail", "fail"): "Défaut persistant", ("pass", "pass"): "Succès maintenu"}
+
+
+def classify(before, after, same_scope, same_build):
+    if same_build:
+        return "Non comparable", "Les deux campagnes identifient le même build."
+    for side, entries in (("Référence", before), ("Candidat", after)):
+        for entry in entries:
+            if entry.reason:
+                return "Non comparable", f"{side} · {entry.reason}"
+        if len(entries) > 1:
+            return "Non comparable", f"{side} · Plusieurs résultats pour la même identité."
+    if not before or not after:
+        side = "la référence" if not before else "le candidat"
+        return "Non comparable", f"Scénario ou cible sans correspondance dans {side}."
+    left, right = before[0], after[0]
+    if not same_scope or left.repro != right.repro:
+        return "Non comparable", "Périmètre ou conditions de reproduction différents ou inconnus."
+    if not all(isinstance(case.expected, str) and case.expected.strip() for case in (left, right)):
+        return "Non comparable", "Attendu absent."
+    if left.expected != right.expected:
+        return "Non comparable", "Attendu modifié."
+    if {path.resolve() for path, _ in left.artifacts}.intersection(path.resolve() for path, _ in right.artifacts):
+        return "Non comparable", "Même pièce d’exécution dans les deux campagnes."
+    return TRANSITIONS[left.status, right.status], ""
+
+
+def proof_text(entries, base):
+    proofs = []
+    for entry in entries:
+        for path, status in entry.artifacts:
+            proofs.append(f"{LABEL[status]} · {os.path.relpath(path, base)}")
+    return " / ".join(proofs) or "Aucune pièce exploitable"
+
+
+def comparison_target(target, base, build, used, index):
+    trace = Trace(comparing=True)
+    try:
+        cases, issues, source = read_target(target, base, build, used, trace)
+        local_index = defaultdict(list)
+        index_target(local_index, target, trace, cases)
+        for key, entries in local_index.items():
+            index[key].extend(entries)
+        return cases, issues, source
+    except (KeyError, ValueError, TypeError, AttributeError) as error:
+        reason = f"Cible inexploitable · {error}"
+        names = target.get("planned") if isinstance(target, dict) else None
+        names = [n for n in names if isinstance(n, str)] if isinstance(names, list) else []
+        label = target.get("label") if isinstance(target, dict) else None
+        for name in names or ["Scénario inconnu"]:
+            key = (str(label or ""), "source inconnue", name, None)
+            index[key].append(ComparedCase(None, None, "blocked", (), reason))
+        return {}, [reason], None
+
+
+def comparison_html(reference, campaign, base, candidate):
+    heading = "<section><h2>Comparaison des campagnes</h2>"
+    baseline = defaultdict(list)
+    try:
+        previous = json.loads(reference.read_text(encoding="utf-8"))
+        used = set()
+        for target in previous["targets"]:
+            comparison_target(target, reference.parent, previous["build"], used, baseline)
+        build = previous["build"]
+        if not all(isinstance(b, str) and b.strip() for b in (build, campaign["build"])):
+            return f"{heading}<p>Build absent du manifeste de référence ou du candidat.</p></section>"
+        same_scope = bool(campaign["scope"].strip()) and previous.get("scope") == campaign["scope"]
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return f"{heading}<p>Manifeste de référence absent ou illisible · {h(reference.name)}</p></section>"
+    rows = []
+    totals = Counter()
+    for key in dict.fromkeys([*candidate, *baseline]):
+        label, kind, name, identity = key
+        before, after = baseline.get(key, []), candidate.get(key, [])
+        if identity:
+            # An unreadable second run on the same named target could be a retry of this case.
+            unknown = (label, kind, name, None)
+            if before:
+                before = before + baseline.get(unknown, [])
+            if after:
+                after = after + candidate.get(unknown, [])
+        verdict, reason = classify(before, after, same_scope, build.strip() == campaign["build"].strip())
+        totals[verdict] += 1
+        target = " · ".join((label, kind, *identity[:2])) if identity and kind == "maestro" else f"{label} · {kind}"
+        rows.append(f"<tr><td><strong>{h(name)}</strong><div>{h(target)}</div>"
+                    f"<div>Référence · {h(proof_text(before, base))}</div>"
+                    f"<div>Candidat · {h(proof_text(after, base))}</div></td>"
+                    f"<td><b>{h(verdict)}</b><div>{h(reason)}</div></td></tr>")
+    return (f"{heading}<p>Référence · {h(build)} · {h(os.path.relpath(reference, base))}<br>"
+            f"Candidat · {h(campaign['build'])}</p>"
+            f"<p>Régressions · {totals['Régression']} | Corrections · {totals['Correction']} | "
+            f"Défauts persistants · {totals['Défaut persistant']} | Non comparables · {totals['Non comparable']}</p>"
+            "<table><thead><tr><th>Scénario, cible et preuves</th><th>Évolution</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table></section>")
+
+
+def build_html(campaign, base, reference=None):
+    candidate = defaultdict(list)
     totals = Counter()
     sections = []
     planned = reached = 0
@@ -199,10 +440,20 @@ def build_html(campaign, base):
     if not campaign["targets"]:
         raise ValueError("La campagne demande au moins une cible.")
     for target in campaign["targets"]:
-        cases, issues, source = read_target(target, base, campaign["build"], used)
+        if reference is None:
+            cases, issues, source = read_target(target, base, campaign["build"], used, Trace())
+        else:
+            cases, issues, source = comparison_target(target, base, campaign["build"], used, candidate)
+            if source is None:
+                all_issues.extend(issues)
+                sections.append(f"<section><h2>Cible inexploitable</h2><p>{h(issues[0])}</p></section>")
+                if isinstance(target, dict) and isinstance(target.get("planned"), list):
+                    planned += len(target["planned"])
+                    totals["blocked"] += len(target["planned"])
+                continue
         names = target["planned"]
         planned += len(names)
-        notes = dict(target.get("notes", {}))
+        notes = campaign_notes(target, set(names).union(cases))
         if "observations" in target:
             for obs in target["observations"]:
                 notes[obs["name"]] = {**notes.get(obs["name"], {}), **obs}
@@ -238,7 +489,7 @@ def build_html(campaign, base):
                         f"<td class='{status}'>{LABEL[status]}</td></tr>")
         all_issues.extend(issues)
         warnings = "".join(f"<p class='blocked'>{h(issue)}</p>" for issue in issues)
-        sections.append(f"<section><h2>{h(target['label'])}</h2><small>Source · {h(source)}</small>"
+        sections.append(f"<section><h2>{h(target.get('label') or 'Cible absente')}</h2><small>Source · {h(source)}</small>"
                         f"{warnings}<table><thead><tr><th>Scénario et constats</th><th>Résultat</th>"
                         f"</tr></thead><tbody>{''.join(rows)}</tbody></table></section>")
     if totals["fail"]:
@@ -248,6 +499,8 @@ def build_html(campaign, base):
     else:
         verdict = "Parcours vérifiés"
     cards = "".join(f"<div><strong>{totals[key]}</strong>{label}</div>" for key, label in LABEL.items())
+    if reference is not None:
+        sections.insert(0, comparison_html(reference, campaign, base, candidate))
     css = Path(__file__).with_name("report.css").read_text()
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     return f"""<!doctype html><html lang="fr"><head><meta charset="utf-8">
@@ -285,12 +538,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("campaign", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument("--reference", type=Path, help="Manifeste de la campagne de référence")
     args = parser.parse_args()
     if args.output.suffix.lower() != ".pdf":
         parser.error("Choisir un fichier de sortie .pdf.")
     try:
         campaign = json.loads(args.campaign.read_text(encoding="utf-8"))
-        export(build_html(campaign, args.campaign.parent), args.output)
+        export(build_html(campaign, args.campaign.parent, args.reference), args.output)
     except (OSError, KeyError, TypeError, ValueError, ET.ParseError, subprocess.SubprocessError) as error:
         parser.exit(1, f"Rapport Argus interrompu · {error}\n")
     print(args.output)
