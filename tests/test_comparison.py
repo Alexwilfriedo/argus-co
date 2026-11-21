@@ -1,4 +1,5 @@
 """Synthetic campaigns exercised through the PDF renderer."""
+
 import json
 import tempfile
 import unittest
@@ -23,13 +24,19 @@ class ComparisonTest(unittest.TestCase):
         (run / "target.txt").write_text(f"{device}\n{app}\n")
         (run / "exit-code.txt").write_text("1" if "fail" in statuses.values() else "0")
         body = {"pass": "", "fail": "<failure/>", "blocked": "<error/>", "skip": "<skipped/>"}
-        cases = "".join(f'<testcase name="{name}">{body[status]}</testcase>' for name, status in statuses.items())
+        cases = "".join(
+            f'<testcase name="{name}">{body[status]}</testcase>' for name, status in statuses.items()
+        )
         (run / "junit.xml").write_text(f"<testsuite>{cases}</testsuite>")
-        return dict(label="Mobile", maestro=folder, planned=list(statuses),
-                    notes={name: dict(expected="Règle A") for name in statuses})
+        return {
+            "label": "Mobile",
+            "maestro": folder,
+            "planned": list(statuses),
+            "notes": {name: {"expected": "Règle A"} for name in statuses},
+        }
 
     def campaign(self, base, targets, scope="Recette locale"):
-        return dict(title="Synthèse", scope=scope, build=base.name, targets=targets)
+        return {"title": "Synthèse", "scope": scope, "build": base.name, "targets": targets}
 
     def compare(self, before, after, scope="Recette locale"):
         ref = self.old / "campaign.json"
@@ -38,8 +45,8 @@ class ComparisonTest(unittest.TestCase):
         return html.split("<h2>Comparaison des campagnes</h2>")[1].split("</section>")[0]
 
     def test_stable_transitions_and_sources(self):
-        first = self.mobile(self.old, dict(A="pass", B="fail", C="fail", D="pass"))
-        last = self.mobile(self.new, dict(A="fail", B="pass", C="fail", D="pass"))
+        first = self.mobile(self.old, {"A": "pass", "B": "fail", "C": "fail", "D": "pass"})
+        last = self.mobile(self.new, {"A": "fail", "B": "pass", "C": "fail", "D": "pass"})
         html = self.compare([first], [last])
         for verdict in ("Régression", "Correction", "Défaut persistant", "Succès maintenu"):
             self.assertIn(">" + verdict + "<", html)
@@ -47,19 +54,24 @@ class ComparisonTest(unittest.TestCase):
         self.assertIn("run/junit.xml", html)
 
     def test_unmatched_identity_and_missing_or_changed_expectations(self):
-        old = self.mobile(self.old, dict(Old="fail", Legacy="fail", Changed="fail", Steps="fail"))
-        new = self.mobile(self.new, dict(New="pass", Legacy="pass", Changed="pass", Steps="pass"))
+        old = self.mobile(self.old, {"Old": "fail", "Legacy": "fail", "Changed": "fail", "Steps": "fail"})
+        new = self.mobile(self.new, {"New": "pass", "Legacy": "pass", "Changed": "pass", "Steps": "pass"})
         old["notes"].pop("Legacy")
         new["notes"]["Changed"]["expected"] = "Règle B"
         new["notes"]["Steps"]["repro"] = "Hors ligne"
         html = self.compare([old], [new])
-        for reason in ("sans correspondance", "Attendu absent", "Attendu modifié", "conditions de reproduction"):
+        for reason in (
+            "sans correspondance",
+            "Attendu absent",
+            "Attendu modifié",
+            "conditions de reproduction",
+        ):
             self.assertIn(reason, html)
         self.assertIn("Régressions · 0 | Corrections · 0", html)
 
     def test_actual_target_is_required(self):
-        old = self.mobile(self.old, dict(A="fail"))
-        new = self.mobile(self.new, dict(A="pass"))
+        old = self.mobile(self.old, {"A": "fail"})
+        new = self.mobile(self.new, {"A": "pass"})
         for recorded in ("sim-02\nlocal.demo", "sim-01\nlocal.other", ""):
             with self.subTest(recorded=recorded):
                 (self.new / "run/target.txt").write_text(recorded)
@@ -68,10 +80,10 @@ class ComparisonTest(unittest.TestCase):
                 self.assertIn("sans correspondance", html)
 
     def test_blocked_case_conflict_and_partial_run(self):
-        old = self.mobile(self.old, dict(Good="fail", Blocked="fail", Conflict="fail"))
-        new = self.mobile(self.new, dict(Good="pass", Blocked="blocked", Conflict="pass"))
+        old = self.mobile(self.old, {"Good": "fail", "Blocked": "fail", "Conflict": "fail"})
+        new = self.mobile(self.new, {"Good": "pass", "Blocked": "blocked", "Conflict": "pass"})
         new["notes"]["Conflict"]["conflict"] = "<contrat>"
-        broken = self.mobile(self.new, dict(Other="fail"), folder="broken")
+        broken = self.mobile(self.new, {"Other": "fail"}, folder="broken")
         (self.new / "broken/junit.xml").write_text("<testsuite>")
         for target in ([broken, new], [new, broken]):
             html = self.compare([old], target)
@@ -80,9 +92,9 @@ class ComparisonTest(unittest.TestCase):
                 self.assertIn(reason, html)
 
     def test_retry_disagreement_and_unreadable_retry(self):
-        old = self.mobile(self.old, dict(A="pass"))
-        new = self.mobile(self.new, dict(A="pass"))
-        self.mobile(self.new, dict(A="fail"), folder="retry")
+        old = self.mobile(self.old, {"A": "pass"})
+        new = self.mobile(self.new, {"A": "pass"})
+        self.mobile(self.new, {"A": "fail"}, folder="retry")
         for runs in (["run", "retry"], ["retry", "run"], ["retry", "missing"]):
             new["maestro"] = runs
             html = self.compare([old], [new])
@@ -93,12 +105,26 @@ class ComparisonTest(unittest.TestCase):
         specs = []
         names = []
         for title, project, outcome, attempts in tests:
-            specs.append(dict(title=title, tests=[dict(projectName=project, status=outcome,
-                                                       results=[dict(status=a) for a in attempts])]))
+            specs.append(
+                {
+                    "title": title,
+                    "tests": [
+                        {
+                            "projectName": project,
+                            "status": outcome,
+                            "results": [{"status": a} for a in attempts],
+                        }
+                    ],
+                }
+            )
             names.append(" › ".join(filter(None, [project, "suite", title])))
-        (base / "pw.json").write_text(json.dumps(dict(suites=[dict(title="suite", specs=specs)])))
-        return dict(label="Web", playwright="pw.json", planned=names,
-                    notes={name: dict(expected="Message visible") for name in names})
+        (base / "pw.json").write_text(json.dumps({"suites": [{"title": "suite", "specs": specs}]}))
+        return {
+            "label": "Web",
+            "playwright": "pw.json",
+            "planned": names,
+            "notes": {name: {"expected": "Message visible"} for name in names},
+        }
 
     def test_web_stability_requires_raw_attempt_and_named_project(self):
         rows = [
@@ -129,8 +155,8 @@ class ComparisonTest(unittest.TestCase):
         self.assertIn("illisible", self.compare([old], [new]))
 
     def test_observations_are_excluded_and_old_export_has_no_comparison(self):
-        item = dict(name="Manuel", status="pass", evidence="trace.txt")
-        target = dict(label="QA", planned=["Manuel"], observations=[item])
+        item = {"name": "Manuel", "status": "pass", "evidence": "trace.txt"}
+        target = {"label": "QA", "planned": ["Manuel"], "observations": [item]}
         for base in (self.old, self.new):
             (base / "trace.txt").write_text("synthetic")
         html = self.compare([target], [target])
@@ -141,26 +167,26 @@ class ComparisonTest(unittest.TestCase):
         self.assertIn("Parcours vérifiés", single)
 
     def test_build_mismatch_and_ambiguous_name(self):
-        old = self.mobile(self.old, dict(A="fail"))
-        new = self.mobile(self.new, dict(A="pass"))
+        old = self.mobile(self.old, {"A": "fail"})
+        new = self.mobile(self.new, {"A": "pass"})
         (self.new / "run/build.txt").write_text("wrong")
         self.assertIn("diffère du manifeste", self.compare([old], [new]))
         (self.new / "run/build.txt").write_text(self.new.name)
-        duplicate = self.mobile(self.new, dict(A="fail"), folder="repeat")
+        duplicate = self.mobile(self.new, {"A": "fail"}, folder="repeat")
         self.assertIn("Plusieurs résultats", self.compare([old], [new, duplicate]))
 
     def test_malformed_target_does_not_hide_verified_peer(self):
-        old = self.mobile(self.old, dict(Good="fail"))
-        new = self.mobile(self.new, dict(Good="pass"))
-        bad = dict(planned=["Sans source"], label="Autre")
+        old = self.mobile(self.old, {"Good": "fail"})
+        new = self.mobile(self.new, {"Good": "pass"})
+        bad = {"planned": ["Sans source"], "label": "Autre"}
         html = self.compare([bad, old], [new, bad])
         self.assertIn("Corrections · 1", html)
         self.assertIn("Sans source", html)
         self.assertIn("Cible inexploitable", html)
 
     def test_driver_error_is_not_a_correction(self):
-        old = self.mobile(self.old, dict(A="fail"))
-        new = self.mobile(self.new, dict(A="pass"))
+        old = self.mobile(self.old, {"A": "fail"})
+        new = self.mobile(self.new, {"A": "pass"})
         (self.new / "run/exit-code.txt").write_text("1")
         html = self.compare([old], [new])
         self.assertIn("Corrections · 0", html)

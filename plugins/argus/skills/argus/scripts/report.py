@@ -1,19 +1,18 @@
 """Build an offline PDF from a campaign plan and the results of its own run."""
 import argparse
 import base64
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html import escape
-import hashlib
-import json
-import os
 from pathlib import Path
-import shutil
-import subprocess
 from tempfile import TemporaryDirectory
-import xml.etree.ElementTree as ET
-
 
 LABEL = {"pass": "Réussi", "fail": "Échec", "flaky": "Instable",
          "skip": "Ignoré", "blocked": "Non vérifié", "xfail": "Échec attendu"}
